@@ -1,114 +1,172 @@
 package main
 
 import (
-	"image"
-	"image/color"
-	"image/png"
-	"math"
-	"os"
-	"strconv"
+    "fmt"
+    "image"
+    "image/color"
+    "image/png"
+    "log"
+    "math"
+    "math/cmplx"
+    "os"
+    "path/filepath"
+    "sync"
+)
+
+// Constants for the image dimensions and fractal parameters
+const (
+    width, height    = 960, 540        // Half HD resolution (for faster rendering)
+    maxIterations    = 1000            // Reduced iterations for faster computation
+    numFrames        = 600             // 20 seconds at 30 fps
+    supersample      = 1               // Disable supersampling for performance
+    framesDir        = "output_frames" // Directory to store frames
+    maxWorkers       = 16              // Match the number of logical processors
 )
 
 func main() {
-	const (
-		numFrames = 300              // Total frames for the loop
-		width     = 1280             // Video width
-		height    = 720              // Video height
-		maxIter   = 512              // Iterations per pixel
-		fps       = 30               // Frames per second
-		zoomSpeed = 0.02             // Zoom speed multiplier
-	)
+    // Create the frames directory if it doesn't exist
+    err := os.MkdirAll(framesDir, os.ModePerm)
+    if err != nil {
+        log.Fatalf("Failed to create frames directory: %v", err)
+    }
 
-	// Create output directory
-	os.Mkdir("frames", 0755)
+    // Initial zoom window
+    xMin, xMax := -2.0, 1.0
+    yMin, yMax := -1.5, 1.5
 
-	// Initial viewport parameters (centered on main ship)
-	centerX, centerY := -1.75, 0.0
-	initialScale := 2.5
+    // Worker pool setup
+    var wg sync.WaitGroup
+    frameChan := make(chan int, numFrames) // Channel to distribute frames among workers
 
-	for frame := 0; frame < numFrames; frame++ {
-		// Calculate smooth zoom using sine wave for seamless loop
-		theta := 2 * math.Pi * float64(frame) / float64(numFrames)
-		scale := initialScale * math.Exp(-zoomSpeed*float64(frame)*math.Sin(theta))
+    // Start worker goroutines
+    for w := 0; w < maxWorkers; w++ {
+        wg.Add(1)
+        go func() {
+            defer wg.Done()
+            for frame := range frameChan {
+                generateFrame(frame, xMin, xMax, yMin, yMax)
+            }
+        }()
+    }
 
-		// Calculate dynamic viewport
-		xRange := scale * 3.0 // 3:2 aspect ratio
-		yRange := scale * 2.0
-		
-		xMin := centerX - xRange/2
-		xMax := centerX + xRange/2
-		yMin := centerY - yRange/2
-		yMax := centerY + yRange/2
+    // Send frames to the channel
+    for frame := 0; frame < numFrames; frame++ {
+        frameChan <- frame
+    }
+    close(frameChan) // Close the channel after all frames are sent
 
-		img := image.NewRGBA(image.Rect(0, 0, width, height))
-
-		// Generate fractal frame
-		for px := 0; px < width; px++ {
-			for py := 0; py < height; py++ {
-				x := xMin + (float64(px)/float64(width))*(xMax-xMin)
-				y := yMin + (float64(height-py-1)/float64(height))*(yMax-yMin)
-
-				zx, zy := 0.0, 0.0
-				var iteration int
-
-				for iteration = 0; iteration < maxIter && (zx*zx+zy*zy) < 4.0; iteration++ {
-					xtmp := zx*zx - zy*zy + x
-					zy = 2*math.Abs(zx*zy) + y
-					zx = xtmp
-				}
-
-				// Animated color based on frame number
-				hueShift := float64(frame) / float64(numFrames)
-				img.Set(px, py, animatedColor(iteration, maxIter, zx, zy, hueShift))
-			}
-		}
-
-		// Save frame with sequential numbering
-		f, _ := os.Create("frames/frame_" + strconv.Itoa(frame) + ".png")
-		png.Encode(f, img)
-		f.Close()
-	}
+    // Wait for all workers to finish
+    wg.Wait()
+    log.Println("All frames generated. Use ffmpeg to create a video.")
 }
 
-func animatedColor(iter, maxIter int, zx, zy float64, hueShift float64) color.Color {
-	if iter == maxIter {
-		return color.RGBA{R: 0, G: 0, B: 0, A: 255}
-	}
+// generateFrame generates a single frame of the Mandelbrot set
+func generateFrame(frame int, xMin, xMax, yMin, yMax float64) {
+    // Compute the zoom factor for continuous zoom
+    zoomFactor := math.Pow(0.99, float64(frame+1)) // Logarithmic zoom
 
-	// Smooth coloring with animated hue
-	modulus := math.Sqrt(zx*zx + zy*zy)
-	mu := float64(iter) + 1 - math.Log(math.Log(modulus))/math.Log(2)
-	mu /= float64(maxIter)
+    // Compute the zoom window for this frame
+    centerX := (xMin + xMax) / 2
+    centerY := (yMin + yMax) / 2
+    xRange := (xMax - xMin) * zoomFactor
+    yRange := (yMax - yMin) * zoomFactor
+    xMin = centerX - xRange/2
+    xMax = centerX + xRange/2
+    yMin = centerY - yRange/2
+    yMax = centerY + yRange/2
 
-	// Convert to HSV color space for better color cycling
-	hue := math.Mod(0.7+mu+hueShift, 1.0)
-	sat := 0.8
-	val := math.Pow(mu, 0.3)
+    // Slight panning effect (optional)
+    centerX += 0.0001 * math.Sin(float64(frame)/10) // Horizontal pan
+    centerY += 0.0001 * math.Cos(float64(frame)/10) // Vertical pan
+    xMin += centerX - (xMin + xMax) / 2
+    xMax += centerX - (xMin + xMax) / 2
+    yMin += centerY - (yMin + yMax) / 2
+    yMax += centerY - (yMin + yMax) / 2
 
-	// Convert HSV to RGB
-	r, g, b := hsvToRGB(hue, sat, val)
-	
-	return color.RGBA{
-		R: uint8(r * 255),
-		G: uint8(g * 255),
-		B: uint8(b * 255),
-		A: 255,
-	}
+    // Log progress
+    log.Printf("Generating frame %d/%d...", frame+1, numFrames)
+
+    // Create a new image with the specified dimensions
+    img := image.NewRGBA(image.Rect(0, 0, width, height))
+
+    // Generate the Mandelbrot set for this frame
+    for py := 0; py < height; py++ {
+        for px := 0; px < width; px++ {
+            r, g, b := uint64(0), uint64(0), uint64(0)
+            for sy := 0; sy < supersample; sy++ {
+                for sx := 0; sx < supersample; sx++ {
+                    // Map sub-pixel position to a point in the complex plane
+                    subX := float64(px) + float64(sx)/float64(supersample)
+                    subY := float64(py) + float64(sy)/float64(supersample)
+                    x0 := subX/float64(width)*(xMax-xMin) + xMin
+                    y0 := subY/float64(height)*(yMax-yMin) + yMin
+                    c := complex(x0, y0)
+
+                    // Compute the number of iterations for the Mandelbrot set
+                    iterations := mandelbrot(c)
+
+                    // Map the iteration count to a color
+                    col := getColor(iterations)
+                    r += uint64(col.R)
+                    g += uint64(col.G)
+                    b += uint64(col.B)
+                }
+            }
+
+            // Average the colors from supersampling
+            totalSamples := supersample * supersample
+            img.Set(px, py, color.RGBA{
+                uint8(r / uint64(totalSamples)),
+                uint8(g / uint64(totalSamples)),
+                uint8(b / uint64(totalSamples)),
+                255,
+            })
+        }
+    }
+
+    // Save the frame as a PNG file in the frames directory
+    filename := fmt.Sprintf("frame_%04d.png", frame)
+    filePath := filepath.Join(framesDir, filename)
+    file, err := os.Create(filePath)
+    if err != nil {
+        log.Printf("Failed to create file '%s': %v", filePath, err)
+        return
+    }
+    defer file.Close()
+
+    err = png.Encode(file, img)
+    if err != nil {
+        log.Printf("Failed to encode image '%s': %v", filePath, err)
+        return
+    }
+
+    log.Printf("Frame %d/%d saved as '%s'", frame+1, numFrames, filePath)
 }
 
-func hsvToRGB(h, s, v float64) (float64, float64, float64) {
-	i := math.Floor(h * 6)
-	f := h*6 - i
-	p := v * (1 - s)
-	q := v * (1 - f*s)
-	t := v * (1 - (1-f)*s)
+// mandelbrot computes the number of iterations for a given complex number
+func mandelbrot(c complex128) int {
+    var z complex128
+    for i := 0; i < maxIterations; i++ {
+        z = z*z + c
+        if cmplx.Abs(z) > 2 {
+            return i
+        }
+    }
+    return maxIterations
+}
 
-	switch int(i) % 6 {
-	case 0: return v, t, p
-	case 1: return q, v, p
-	case 2: return p, v, t
-	case 3: return p, q, v
-	case 4: return t, p, v
-	default: return v, p, q
-	}
+// getColor maps the iteration count to a vibrant color
+func getColor(iterations int) color.RGBA {
+    if iterations == maxIterations {
+        // Points inside the Mandelbrot set are white
+        return color.RGBA{255, 255, 255, 255}
+    }
+
+    // Simple color mapping without dynamic cycling
+    t := float64(iterations) / float64(maxIterations)
+    r := uint8(255 * (1 - t))          // Red decreases as t increases
+    g := uint8(255 * t * t)            // Green increases quadratically
+    b := uint8(255 * t * t * t)        // Blue increases cubically
+
+    return color.RGBA{r, g, b, 255}
 }

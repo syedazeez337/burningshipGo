@@ -8,7 +8,7 @@ import (
 	"os"
 )
 
-func main() {
+func Fractal() {
 	const (
 		width   = 1600
 		height  = 1200
